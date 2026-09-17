@@ -15,6 +15,37 @@ const agents: Agent[] = [
 
 if (typeof window !== 'undefined' && !window.localAI) {
   let webKey = localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+  
+  const callModel = async (model: string, key: string, body: unknown) => {
+    return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
+
+  const tryAllModels = async (key: string, body: unknown) => {
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    let lastErr = ''
+    for (const model of models) {
+      try {
+        const res = await callModel(model, key, body)
+        if (res.ok) {
+          const data = await res.json()
+          return { ok: true, data }
+        }
+        const text = await res.text()
+        lastErr = `שגיאה מ-Gemini (${model} - ${res.status}): ${text.slice(0, 160)}`
+        if (res.status === 400 && text.includes('API_KEY_INVALID')) {
+          return { ok: false, error: 'מפתח ה-API אינו תקין. בדקו שהעתקתם את המפתח המלא מ-Google AI Studio.' }
+        }
+      } catch (e: unknown) {
+        lastErr = e instanceof Error ? e.message : 'שגיאת תקשורת'
+      }
+    }
+    return { ok: false, error: lastErr }
+  }
+
   window.localAI = {
     status: async () => ({ configured: Boolean(webKey) }),
     setKey: async (value: string) => {
@@ -22,31 +53,12 @@ if (typeof window !== 'undefined' && !window.localAI) {
       if (!next) return { configured: false, ok: false, error: 'מפתח Gemini ריק' }
       
       // Test the key with Gemini API before saving
-      try {
-        const testRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${next}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
-        })
-        if (!testRes.ok) {
-          // If 404/400 test with 1.5-flash
-          const testRes2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${next}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
-          })
-          if (!testRes2.ok) {
-            const errBody = await testRes2.text()
-            try {
-              const parsed = JSON.parse(errBody)
-              return { configured: false, ok: false, error: `שגיאה מ-Gemini (${testRes2.status}): ${parsed.error?.message || errBody.slice(0, 120)}` }
-            } catch {
-              return { configured: false, ok: false, error: `מפתח שגוי או חסום (${testRes2.status}): ${errBody.slice(0, 120)}` }
-            }
-          }
-        }
-      } catch (err: unknown) {
-        return { configured: false, ok: false, error: `שגיאת חיבור לרשת: ${err instanceof Error ? err.message : 'לא ניתן לפנות ל-Google'}` }
+      const testResult = await tryAllModels(next, {
+        contents: [{ parts: [{ text: 'שלום' }] }],
+      })
+
+      if (!testResult.ok) {
+        return { configured: false, ok: false, error: testResult.error || 'לא ניתן לאמת את המפתח מול Google' }
       }
 
       webKey = next
@@ -55,58 +67,39 @@ if (typeof window !== 'undefined' && !window.localAI) {
     },
     research: async (topic: string) => {
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
-      try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${webKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: `חקור את הנושא הבא ברשת לפני סיעור מוחות: ${topic}. החזר בעברית תקציר קצר ומדויק, מסודר לקריאה, של 4-6 עובדות, מגמות או הזדמנויות עדכניות. פתח בכותרת "תמונת מצב", אחריה השתמש בשורות קצרות עם תבליט "•", ולסיום הוסף שורה "מה זה אומר לסיעור" עם מסקנה אחת. ציין את מקור המידע ליד הטענה הרלוונטית, ואל תמציא עובדות.` }] }],
-            tools: [{ google_search: {} }],
-          }),
+      
+      // 1. Try with google_search tool
+      let res = await tryAllModels(webKey, {
+        contents: [{ parts: [{ text: `חקור את הנושא הבא ברשת לפני סיעור מוחות: ${topic}. החזר בעברית תקציר קצר ומדויק, מסודר לקריאה, של 4-6 עובדות, מגמות או הזדמנויות עדכניות. פתח בכותרת "תמונת מצב", אחריה השתמש בשורות קצרות עם תבליט "•", ולסיום הוסף שורה "מה זה אומר לסיעור" עם מסקנה אחת. ציין את מקור המידע ליד הטענה הרלוונטית, ואל תמציא עובדות.` }] }],
+        tools: [{ google_search: {} }],
+      })
+
+      // 2. If rejected with tool, try plain prompt
+      if (!res.ok) {
+        res = await tryAllModels(webKey, {
+          contents: [{ parts: [{ text: `סכם ידע, עובדות, מגמות והזדמנויות מרכזיות בנושא הבא לפני סיעור מוחות: ${topic}. פתח בכותרת "תמונת מצב", אחריה שורות תבליט "•", ולסיום "מה זה אומר לסיעור" עם מסקנה מעשית אחת.` }] }],
         })
-        if (!response.ok) {
-          // Fallback without search grounding if region/key doesn't allow tools
-          const fallback = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${webKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: `סכם ידע, מגמות והזדמנויות מרכזיות בנושא הבא לפני סיעור מוחות: ${topic}. פתח בכותרת "תמונת מצב", הוסף תבליטים ומסקנה לסיעור.` }] }],
-            }),
-          })
-          if (!fallback.ok) {
-            const err = await fallback.text()
-            return { configured: true, ok: false, error: `Gemini ${response.status}: ${err.slice(0, 150)}` }
-          }
-          const fbData = await fallback.json()
-          return { configured: true, ok: true, text: fbData.candidates?.[0]?.content?.parts?.[0]?.text || '', sources: [] }
-        }
-        const data = await response.json()
-        const candidate = data.candidates?.[0]
-        const rawSources = candidate?.groundingMetadata?.groundingChunks ?? []
-        interface WebChunk { web?: { title?: string; uri?: string } }
-        const sources = (rawSources as WebChunk[]).map((c) => c.web).filter((w): w is { title?: string; uri?: string } => Boolean(w)).slice(0, 5)
-        return { configured: true, ok: true, text: candidate?.content?.parts?.[0]?.text || '', sources }
-      } catch (e: unknown) {
-        return { configured: true, ok: false, error: e instanceof Error ? e.message : 'שגיאת רשת' }
       }
+
+      if (!res.ok) {
+        return { configured: true, ok: false, error: res.error }
+      }
+
+      const candidate = res.data?.candidates?.[0]
+      const rawSources = candidate?.groundingMetadata?.groundingChunks ?? []
+      interface WebChunk { web?: { title?: string; uri?: string } }
+      const sources = (rawSources as WebChunk[]).map((c) => c.web).filter((w): w is { title?: string; uri?: string } => Boolean(w)).slice(0, 5)
+      return { configured: true, ok: true, text: candidate?.content?.parts?.[0]?.text || '', sources }
     },
     generate: async (prompt: string) => {
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
-      try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${webKey}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        })
-        if (!response.ok) {
-          const err = await response.text()
-          return { configured: true, ok: false, error: `Gemini ${response.status}: ${err.slice(0, 150)}` }
-        }
-        const data = await response.json()
-        return { configured: true, ok: true, text: data.candidates?.[0]?.content?.parts?.[0]?.text || '[]' }
-      } catch (e: unknown) {
-        return { configured: true, ok: false, error: e instanceof Error ? e.message : 'שגיאת רשת' }
+      const res = await tryAllModels(webKey, {
+        contents: [{ parts: [{ text: prompt }] }],
+      })
+      if (!res.ok) {
+        return { configured: true, ok: false, error: res.error }
       }
+      return { configured: true, ok: true, text: res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]' }
     },
   }
 }
