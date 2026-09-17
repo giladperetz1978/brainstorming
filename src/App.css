@@ -1081,8 +1081,41 @@ h2 {
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   font-family: monospace;
-  font-size: 12px;
+  font-size: 13px;
   direction: ltr;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.api-key-input:focus {
+  border-color: #d97706;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.15);
+}
+
+.modal-notice {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.key-help-link {
+  margin-top: 14px;
+  text-align: center;
+}
+
+.key-help-link a {
+  color: #0284c7;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.key-help-link a:hover {
+  color: #0369a1;
 }
 
 .full-button {

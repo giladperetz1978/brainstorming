@@ -20,6 +20,35 @@ if (typeof window !== 'undefined' && !window.localAI) {
     setKey: async (value: string) => {
       const next = String(value || '').trim()
       if (!next) return { configured: false, ok: false, error: 'מפתח Gemini ריק' }
+      
+      // Test the key with Gemini API before saving
+      try {
+        const testRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${next}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
+        })
+        if (!testRes.ok) {
+          // If 404/400 test with 1.5-flash
+          const testRes2 = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${next}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
+          })
+          if (!testRes2.ok) {
+            const errBody = await testRes2.text()
+            try {
+              const parsed = JSON.parse(errBody)
+              return { configured: false, ok: false, error: `שגיאה מ-Gemini (${testRes2.status}): ${parsed.error?.message || errBody.slice(0, 120)}` }
+            } catch {
+              return { configured: false, ok: false, error: `מפתח שגוי או חסום (${testRes2.status}): ${errBody.slice(0, 120)}` }
+            }
+          }
+        }
+      } catch (err: unknown) {
+        return { configured: false, ok: false, error: `שגיאת חיבור לרשת: ${err instanceof Error ? err.message : 'לא ניתן לפנות ל-Google'}` }
+      }
+
       webKey = next
       try { localStorage.setItem('FUTURE_AMAREL_KEY', next) } catch { /* ignore */ }
       return { configured: true, ok: true }
@@ -462,7 +491,50 @@ function App() {
       {isThinking && <div className="thinking-overlay" role="status"><div className="thinking-card"><div className="thinking-orbit"><span>🧠</span><i>ϟ</i><i>ϟ</i><i>ϟ</i></div><div className="section-kicker">סיעור בתנועה</div><h2>{thinkingPhase}</h2><p>ארבע נקודות מבט מתנגשות, מתחברות ומחפשות את הניצוץ הבא.</p><div className="thinking-dots"><i /><i /><i /></div></div></div>}
       {showResearch && research && <div className="modal-backdrop research-backdrop" onClick={() => setShowResearch(false)}><section className="research-modal" onClick={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setShowResearch(false)}>×</button><div className="research-heading"><span className="research-icon">⌕</span><div><div className="section-kicker">מודיעין מקדים</div><h2>מה למדנו מהרשת</h2></div></div><p className="research-copy">{research.text}</p>{research.sources.length > 0 && <div className="source-list">{research.sources.map((source) => <a href={source.uri} target="_blank" rel="noreferrer" key={source.uri}>{source.title || source.uri}</a>)}</div>}<div className="research-footnote">המחקר שימש את ארבעת הסוכנים כהקשר, לא כתשובה.</div></section></div>}
       {discussion && <section className="discussion-panel"><div className="discussion-header"><div><div className="section-kicker">שיחה חיה סביב רעיון</div><h2>{discussion.idea.text}</h2></div><button className="close-discussion" onClick={() => setDiscussion(null)}>×</button></div><div className="reply-list">{discussion.replies.map((reply, index) => <article className={`reply-card ${reply.human ? 'human-reply' : ''}`} key={`${reply.human ? 'human' : reply.agent?.id}-${index}`}><div className="avatar" style={{ background: reply.human ? '#213b59' : reply.agent?.color }}>{reply.human ? 'את' : reply.agent?.initials}</div><div><strong>{reply.human ? 'את/ה · המנחה' : `${reply.agent?.name} · ${reply.agent?.role}`}</strong><p>{reply.text}</p></div></article>)}</div><div className="human-input discussion-input"><div className="input-avatar">את</div><textarea value={discussionThought} onChange={(event) => setDiscussionThought(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendDiscussionMessage() } }} placeholder="הגב/י לצוות והמשיכו את הדיון…" /><button className="send-button" onClick={() => void sendDiscussionMessage()} disabled={isDiscussing} aria-label="שליחת תגובה">{isDiscussing ? '…' : '↑'}</button></div></section>}
-      {showSettings && <div className="modal-backdrop" onClick={() => { if (aiConfigured) setShowSettings(false) }}><div className="settings-modal" onClick={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setShowSettings(false)}>×</button><div className="section-kicker">חיבור מודל</div><h2>Gemini Flash</h2><p>{aiConfigured ? 'החיבור פעיל. אפשר להחליף את המפתח כאן; הוא נשמר מוצפן במחשב הזה.' : 'הדבק/י כאן את מפתח Gemini. הוא יישמר מוצפן במחשב הזה ולא יישלח לשום מקום מלבד Gemini.'}</p><div className={`connection-state ${aiConfigured ? 'connected' : ''}`}><span /> {aiConfigured ? 'AI פעיל' : 'נדרש חיבור'}</div><input className="api-key-input" type="password" value={apiKeyInput} onChange={(event) => setApiKeyInput(event.target.value)} placeholder="AIza..." autoFocus={!aiConfigured} onKeyDown={(event) => { if (event.key === 'Enter') void saveApiKey() }} /><button className="primary-button full-button" onClick={() => void saveApiKey()} disabled={!apiKeyInput.trim() || isSavingKey}>{isSavingKey ? 'שומר…' : 'שמירת מפתח וחיבור Gemini'}</button>{aiConfigured && <button className="secondary-button full-button" onClick={() => setShowSettings(false)}>סגירה</button>}</div></div>}
+      {showSettings && (
+        <div className="modal-backdrop" onClick={() => { if (aiConfigured) setShowSettings(false) }}>
+          <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
+            <button className="close-button" onClick={() => setShowSettings(false)}>×</button>
+            <div className="section-kicker">חיבור מודל</div>
+            <h2>Gemini Flash API</h2>
+            <p>
+              {aiConfigured
+                ? 'החיבור פעיל! המפתח נשמר במכשיר זה. ניתן להזין מפתח חלופי בכל עת.'
+                : 'הדבק/י כאן מפתח API של Google Gemini. המפתח נבדק מול השרת ונשמר במכשיר שלך בלבד.'}
+            </p>
+            <div className={`connection-state ${aiConfigured ? 'connected' : ''}`}>
+              <span /> {aiConfigured ? 'חיבור AI פעיל' : 'נדרש מפתח API תקין'}
+            </div>
+            {notice && <div className="modal-notice">{notice}</div>}
+            <input
+              className="api-key-input"
+              type="text"
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
+              placeholder="AIzaSy..."
+              autoFocus={!aiConfigured}
+              onKeyDown={(event) => { if (event.key === 'Enter') void saveApiKey() }}
+            />
+            <button
+              className="primary-button full-button"
+              onClick={() => void saveApiKey()}
+              disabled={!apiKeyInput.trim() || isSavingKey}
+            >
+              {isSavingKey ? 'בודק חיבור מול Google...' : 'שמירת מפתח ואימות חיבור'}
+            </button>
+            <div className="key-help-link">
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+                אין לך מפתח? לחץ/י כאן לקבלת מפתח חינמי ב-Google AI Studio ↗
+              </a>
+            </div>
+            {aiConfigured && (
+              <button className="secondary-button full-button" onClick={() => setShowSettings(false)}>
+                סגירה
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   )
 }

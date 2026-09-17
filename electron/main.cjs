@@ -52,11 +52,20 @@ ipcMain.handle('gemini:set-key', (_event, value) => {
 })
 
 async function askGemini(body) {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`, {
+  // Try modern gemini-2.5-flash first, fallback to gemini-1.5-flash
+  let response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+
+  if (!response.ok && (response.status === 404 || response.status === 400)) {
+    response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
 
   if (!response.ok) {
     const details = await response.text()
