@@ -60,8 +60,8 @@ async function callGeminiApi(model, body) {
 }
 
 async function askGemini(body) {
-  // Test gemini-2.5-flash, fallback to gemini-2.0-flash, then gemini-1.5-flash
-  const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+  // Test gemini-3.8-flash first, fallback to gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash
+  const models = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
   let lastError = ''
 
   for (const model of models) {

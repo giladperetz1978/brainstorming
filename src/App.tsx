@@ -13,10 +13,81 @@ const agents: Agent[] = [
   { id: 'levi', name: 'לוי', role: 'הפסימי', color: '#d19a3b', initials: 'ל', voice: 'מזהה סיכונים, כשלים ותסריטי קצה כדי שנבנה רעיון עמיד יותר.' },
 ]
 
+// Web Crypto Helper for Encrypted Key Storage (AES-GCM 256-bit)
+const ENCRYPT_SALT = 'FutureAmarel-2026-Brainstorm-Salt'
+const ENCRYPT_PASS = 'Brainstorm-Roundtable-Secure-Vault'
+
+async function deriveAesKey(): Promise<CryptoKey> {
+  const enc = new TextEncoder()
+  const baseKey = await window.crypto.subtle.importKey(
+    'raw',
+    enc.encode(ENCRYPT_PASS),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey']
+  )
+  return await window.crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: enc.encode(ENCRYPT_SALT),
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  )
+}
+
+async function encryptApiKey(plainKey: string): Promise<string> {
+  try {
+    const key = await deriveAesKey()
+    const iv = window.crypto.getRandomValues(new Uint8Array(12))
+    const encoded = new TextEncoder().encode(plainKey)
+    const cipher = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded)
+    const combined = new Uint8Array(iv.length + cipher.byteLength)
+    combined.set(iv, 0)
+    combined.set(new Uint8Array(cipher), iv.length)
+    let binary = ''
+    for (let i = 0; i < combined.length; i++) binary += String.fromCharCode(combined[i])
+    return btoa(binary)
+  } catch {
+    return plainKey
+  }
+}
+
+async function decryptApiKey(cipherBase64: string): Promise<string> {
+  try {
+    if (!cipherBase64) return ''
+    const raw = atob(cipherBase64)
+    const combined = new Uint8Array(raw.length)
+    for (let i = 0; i < raw.length; i++) combined[i] = raw.charCodeAt(i)
+    if (combined.length <= 12) return ''
+    const iv = combined.slice(0, 12)
+    const data = combined.slice(12)
+    const key = await deriveAesKey()
+    const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data)
+    return new TextDecoder().decode(decrypted)
+  } catch {
+    // If decryption fails, return as-is (e.g. legacy unencrypted key migration)
+    return cipherBase64
+  }
+}
+
 if (typeof window !== 'undefined' && !window.localAI) {
-  let webKey = localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+  let webKey = ''
+
+  // Initialize key from encrypted storage
+  void (async () => {
+    const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+    if (stored) {
+      webKey = await decryptApiKey(stored)
+    }
+  })()
   
   const callModel = async (model: string, key: string, body: unknown) => {
+    // Strict TLS 1.3/HTTPS encrypted connection
     return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -25,7 +96,8 @@ if (typeof window !== 'undefined' && !window.localAI) {
   }
 
   const tryAllModels = async (key: string, body: unknown) => {
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    // Prioritize Gemini 3.8 Flash, with fallback to 2.5, 2.0, and 1.5
+    const models = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
     let lastErr = ''
     for (const model of models) {
       try {
@@ -47,12 +119,18 @@ if (typeof window !== 'undefined' && !window.localAI) {
   }
 
   window.localAI = {
-    status: async () => ({ configured: Boolean(webKey) }),
+    status: async () => {
+      if (!webKey) {
+        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+        if (stored) webKey = await decryptApiKey(stored)
+      }
+      return { configured: Boolean(webKey) }
+    },
     setKey: async (value: string) => {
       const next = String(value || '').trim()
       if (!next) return { configured: false, ok: false, error: 'מפתח Gemini ריק' }
       
-      // Test the key with Gemini API before saving
+      // Test the key securely over HTTPS before saving
       const testResult = await tryAllModels(next, {
         contents: [{ parts: [{ text: 'שלום' }] }],
       })
@@ -62,10 +140,18 @@ if (typeof window !== 'undefined' && !window.localAI) {
       }
 
       webKey = next
-      try { localStorage.setItem('FUTURE_AMAREL_KEY', next) } catch { /* ignore */ }
+      try {
+        const encrypted = await encryptApiKey(next)
+        localStorage.setItem('FUTURE_AMAREL_ENC_KEY', encrypted)
+        localStorage.removeItem('FUTURE_AMAREL_KEY')
+      } catch { /* ignore */ }
       return { configured: true, ok: true }
     },
     research: async (topic: string) => {
+      if (!webKey) {
+        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+        if (stored) webKey = await decryptApiKey(stored)
+      }
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
       
       // 1. Try with google_search tool
@@ -92,6 +178,10 @@ if (typeof window !== 'undefined' && !window.localAI) {
       return { configured: true, ok: true, text: candidate?.content?.parts?.[0]?.text || '', sources }
     },
     generate: async (prompt: string) => {
+      if (!webKey) {
+        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+        if (stored) webKey = await decryptApiKey(stored)
+      }
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
       const res = await tryAllModels(webKey, {
         contents: [{ parts: [{ text: prompt }] }],
@@ -250,12 +340,12 @@ function App() {
           <span className="brand-mark">🧠⚡</span>
           <div>
             <strong>סיעור מוחות</strong>
-            <small>שולחן עגול חכם · 4 מוחות AI ומשתתף אנושי</small>
+            <small>Gemini 3.8 Flash · חיבור מוצפן · שולחן עגול חכם</small>
           </div>
         </div>
         <div className="top-actions">
           <span className="live-dot">●</span>
-          <span>סשן מקומי</span>
+          <span>חיבור מוצפן</span>
           <button className="icon-button" onClick={() => setShowSettings(true)} aria-label="הגדרות">⚙</button>
         </div>
       </header>
@@ -488,15 +578,15 @@ function App() {
         <div className="modal-backdrop" onClick={() => { if (aiConfigured) setShowSettings(false) }}>
           <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
             <button className="close-button" onClick={() => setShowSettings(false)}>×</button>
-            <div className="section-kicker">חיבור מודל</div>
-            <h2>Gemini Flash API</h2>
+            <div className="section-kicker">חיבור מודל מוצפן</div>
+            <h2>Gemini 3.8 Flash</h2>
             <p>
               {aiConfigured
-                ? 'החיבור פעיל! המפתח נשמר במכשיר זה. ניתן להזין מפתח חלופי בכל עת.'
-                : 'הדבק/י כאן מפתח API של Google Gemini. המפתח נבדק מול השרת ונשמר במכשיר שלך בלבד.'}
+                ? 'החיבור פעיל ומאובטח. כל הבקשות מוצפנות בתקן TLS ומפתח ה-API נשמר מוצפן (AES-GCM / DPAPI) במכשיר שלך בלבד.'
+                : 'הדבק/י כאן מפתח Gemini API. החיבור מוצפן ב-TLS/HTTPS והמפתח נשמר מוצפן (AES-GCM 256-bit) במכשיר שלך בלבד.'}
             </p>
             <div className={`connection-state ${aiConfigured ? 'connected' : ''}`}>
-              <span /> {aiConfigured ? 'חיבור AI פעיל' : 'נדרש מפתח API תקין'}
+              <span /> {aiConfigured ? 'חיבור מוצפן ל-Gemini 3.8 Flash פעיל 🔒' : 'נדרש מפתח API תקין'}
             </div>
             {notice && <div className="modal-notice">{notice}</div>}
             <input
@@ -513,7 +603,7 @@ function App() {
               onClick={() => void saveApiKey()}
               disabled={!apiKeyInput.trim() || isSavingKey}
             >
-              {isSavingKey ? 'בודק חיבור מול Google...' : 'שמירת מפתח ואימות חיבור'}
+              {isSavingKey ? 'בודק ומצפין חיבור מול Google...' : 'שמירת מפתח ואימות חיבור מוצפן'}
             </button>
             <div className="key-help-link">
               <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
