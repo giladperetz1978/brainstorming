@@ -1,5 +1,8 @@
-import { useEffect, useState } from 'react'
-import './App.css'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { ArrowUp, Check, CircleDot, ExternalLink, FlaskConical, Lightbulb, LoaderCircle, MessageCircle, Orbit, Pencil, Play, Settings, Users, X } from 'lucide-react'
+import './Room.css'
+
+const RoundTableScene = lazy(() => import('./RoundTableScene'))
 
 type Agent = { id: string; name: string; role: string; color: string; initials: string; voice: string }
 type Idea = { id: string; author: string; role: string; text: string; color: string }
@@ -41,20 +44,16 @@ async function deriveAesKey(): Promise<CryptoKey> {
 }
 
 async function encryptApiKey(plainKey: string): Promise<string> {
-  try {
-    const key = await deriveAesKey()
-    const iv = window.crypto.getRandomValues(new Uint8Array(12))
-    const encoded = new TextEncoder().encode(plainKey)
-    const cipher = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded)
-    const combined = new Uint8Array(iv.length + cipher.byteLength)
-    combined.set(iv, 0)
-    combined.set(new Uint8Array(cipher), iv.length)
-    let binary = ''
-    for (let i = 0; i < combined.length; i++) binary += String.fromCharCode(combined[i])
-    return btoa(binary)
-  } catch {
-    return plainKey
-  }
+  const key = await deriveAesKey()
+  const iv = window.crypto.getRandomValues(new Uint8Array(12))
+  const encoded = new TextEncoder().encode(plainKey)
+  const cipher = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded)
+  const combined = new Uint8Array(iv.length + cipher.byteLength)
+  combined.set(iv, 0)
+  combined.set(new Uint8Array(cipher), iv.length)
+  let binary = ''
+  for (let index = 0; index < combined.length; index++) binary += String.fromCharCode(combined[index])
+  return btoa(binary)
 }
 
 async function decryptApiKey(cipherBase64: string): Promise<string> {
@@ -70,27 +69,27 @@ async function decryptApiKey(cipherBase64: string): Promise<string> {
     const decrypted = await window.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data)
     return new TextDecoder().decode(decrypted)
   } catch {
-    // If decryption fails, return as-is (e.g. legacy unencrypted key migration)
-    return cipherBase64
+    return /^AIza[\w-]+$/.test(cipherBase64) ? cipherBase64 : ''
   }
 }
 
 if (typeof window !== 'undefined' && !window.localAI) {
   let webKey = ''
 
-  // Initialize key from encrypted storage
-  void (async () => {
-    const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
-    if (stored) {
-      webKey = await decryptApiKey(stored)
+  const loadWebKey = async () => {
+    if (webKey) return
+    try {
+      const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
+      if (stored) webKey = await decryptApiKey(stored)
+    } catch {
+      webKey = ''
     }
-  })()
+  }
   
   const callModel = async (model: string, key: string, body: unknown) => {
-    // Strict TLS 1.3/HTTPS encrypted connection
-    return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+    return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify(body),
     })
   }
@@ -120,10 +119,7 @@ if (typeof window !== 'undefined' && !window.localAI) {
 
   window.localAI = {
     status: async () => {
-      if (!webKey) {
-        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
-        if (stored) webKey = await decryptApiKey(stored)
-      }
+      await loadWebKey()
       return { configured: Boolean(webKey) }
     },
     setKey: async (value: string) => {
@@ -139,19 +135,18 @@ if (typeof window !== 'undefined' && !window.localAI) {
         return { configured: false, ok: false, error: testResult.error || 'לא ניתן לאמת את המפתח מול Google' }
       }
 
-      webKey = next
       try {
         const encrypted = await encryptApiKey(next)
         localStorage.setItem('FUTURE_AMAREL_ENC_KEY', encrypted)
         localStorage.removeItem('FUTURE_AMAREL_KEY')
-      } catch { /* ignore */ }
+      } catch {
+        return { configured: Boolean(webKey), ok: false, error: 'לא ניתן לשמור את המפתח מוצפן בדפדפן. יש לאפשר אחסון מקומי ולנסות שוב.' }
+      }
+      webKey = next
       return { configured: true, ok: true }
     },
     research: async (topic: string) => {
-      if (!webKey) {
-        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
-        if (stored) webKey = await decryptApiKey(stored)
-      }
+      await loadWebKey()
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
       
       // 1. Try with google_search tool
@@ -178,10 +173,7 @@ if (typeof window !== 'undefined' && !window.localAI) {
       return { configured: true, ok: true, text: candidate?.content?.parts?.[0]?.text || '', sources }
     },
     generate: async (prompt: string) => {
-      if (!webKey) {
-        const stored = localStorage.getItem('FUTURE_AMAREL_ENC_KEY') || localStorage.getItem('FUTURE_AMAREL_KEY') || ''
-        if (stored) webKey = await decryptApiKey(stored)
-      }
+      await loadWebKey()
       if (!webKey) return { configured: false, ok: false, error: 'נדרש מפתח Gemini' }
       const res = await tryAllModels(webKey, {
         contents: [{ parts: [{ text: prompt }] }],
@@ -212,30 +204,46 @@ function App() {
   const [isDiscussing, setIsDiscussing] = useState(false)
   const [notice, setNotice] = useState('')
   const [research, setResearch] = useState<Research | null>(null)
-  const [showResearch, setShowResearch] = useState(false)
+  const [tab, setTab] = useState<'chat' | 'ideas' | 'research'>('chat')
   const [thinkingPhase, setThinkingPhase] = useState('מכינים את השולחן')
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
+  const repliesEndRef = useRef<HTMLDivElement>(null)
+  const settingsRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    repliesEndRef.current?.scrollIntoView({ block: 'nearest', behavior: 'instant' })
+  }, [discussion, isDiscussing, tab])
+
+  useEffect(() => {
+    if (showSettings) settingsRef.current?.showModal()
+    else settingsRef.current?.close()
+  }, [showSettings])
 
   useEffect(() => {
     if (!window.localAI) return
     window.localAI.status().then(({ configured }) => {
       setAiConfigured(configured)
-      if (!configured) setShowSettings(true)
     })
   }, [])
 
   const saveApiKey = async () => {
     if (!apiKeyInput.trim() || isSavingKey) return
     setIsSavingKey(true)
-    const result = await window.localAI.setKey(apiKeyInput)
-    setIsSavingKey(false)
-    if (!result.ok) {
-      setNotice(result.error ?? 'לא ניתן לשמור את המפתח')
-      return
+    try {
+      const result = await window.localAI.setKey(apiKeyInput)
+      if (!result.ok) {
+        setNotice(result.error ?? 'לא ניתן לשמור את המפתח')
+        return
+      }
+      setAiConfigured(true)
+      setApiKeyInput('')
+      setNotice('Gemini מחובר. המפתח נשמר בצורה מוצפנת במכשיר הזה.')
+      setShowSettings(false)
+    } catch {
+      setNotice('לא ניתן לאמת או לשמור את המפתח. נסו שוב.')
+    } finally {
+      setIsSavingKey(false)
     }
-    setAiConfigured(true)
-    setApiKeyInput('')
-    setNotice('Gemini מחובר. המפתח נשמר בצורה מוצפנת במחשב הזה.')
-    setShowSettings(false)
   }
 
   const saveHumanName = () => {
@@ -253,6 +261,7 @@ function App() {
   }
 
   const runRound = async () => {
+    if (isThinking || isDiscussing) return
     const activeTopic = topic.trim() || 'איך נייצר מנוע צמיחה חדש ופורץ דרך בחמש השנים הקרובות?'
     if (!topic.trim()) {
       setTopic(activeTopic)
@@ -286,6 +295,7 @@ function App() {
         color: agents[index]?.color ?? '#4f7cac',
       }))
       setIdeas(generatedIdeas)
+      setTab('ideas')
       setThinkingPhase('מעלים רעיונות')
       setNotice('הסבב הושלם! 4 רעיונות טריים הונחו על השולחן.')
     } catch (error) {
@@ -297,10 +307,15 @@ function App() {
   }
 
   const discussIdea = async (idea: Idea) => {
+    if (isThinking || isDiscussing) return
     if (aiConfigured !== true) {
-      setNotice('Gemini אינו מחובר. הפעילו מחדש עם מפתח API תקין בטרמינל.')
+      setNotice('נדרש חיבור ל-Gemini כדי לפתוח דיון.')
+      setShowSettings(true)
       return
     }
+    setSelectedAgent(null)
+    setTab('chat')
+    setIsDiscussing(true)
     setDiscussion({ idea, replies: [] })
     try {
       const prompt = `אנחנו מנהלים דיון שולחן עגול על הרעיון הבא: ${idea.text}. החזר JSON בלבד כמערך של 4 אובייקטים עם השדות agent ו-text. agent חייב להיות אחד מאלה: maya, ori, tamar, levi. החזר תגובה אחת לכל סוכן: maya חיובית ומסבירה למה הרעיון יכול לעבוד, ori מתנגד ומציג את הצד ההפוך, tamar אופטימית ומציירת תרחיש הצלחה, levi פסימי ומזהה סיכונים. כל סוכן יגיב בעברית ויוסיף ערך חדש.`
@@ -309,22 +324,29 @@ function App() {
       const generated = JSON.parse((result.text ?? '[]').replace(/```json|```/g, '').trim()) as Array<{ agent: string; text: string }>
       setDiscussion({ idea, replies: generated.map((reply) => ({ agent: agents.find((agent) => agent.id === reply.agent) ?? agents[0], text: reply.text })) })
     } catch (error) { setNotice(`הדיון לא התחבר ל-Gemini: ${error instanceof Error ? error.message : 'שגיאה לא ידועה'}`) }
+    finally { setIsDiscussing(false) }
   }
 
   const sendDiscussionMessage = async () => {
     const text = discussionThought.trim()
-    if (!text || !discussion || isDiscussing) return
-    const humanReply: DiscussionReply = { agent: null, text, human: true }
-    setDiscussion((current) => current ? { ...current, replies: [...current.replies, humanReply] } : current)
-    setDiscussionThought('')
+    if (!text || isDiscussing || isThinking) return
     if (aiConfigured !== true) {
       setNotice('Gemini אינו מחובר. לא נשלחה תגובה.')
+      setShowSettings(true)
       return
     }
+    const activeDiscussion = discussion ?? {
+      idea: { id: `open-${Date.now()}`, author: humanName, role: 'המנחה', color: '#319b83', text: topic.trim() || text },
+      replies: [],
+    }
+    const humanReply: DiscussionReply = { agent: null, text, human: true }
+    setDiscussion({ ...activeDiscussion, replies: [...activeDiscussion.replies, humanReply] })
+    setDiscussionThought('')
     setIsDiscussing(true)
     try {
-      const transcript = [...(discussion.replies ?? []), humanReply].map((reply) => `${reply.human ? (humanName || 'המנחה') : reply.agent?.name}: ${reply.text}`).join('\n')
-      const prompt = `אנחנו בדיון חי בעברית על הרעיון: ${discussion.idea.text}. הנה היסטוריית השיחה:\n${transcript}\nהמנחה (${humanName}) הוסיף עכשיו תגובה. החזר JSON בלבד כמערך של 4 אובייקטים עם השדות agent ו-text. החזר תגובה אחת לכל agent: maya, ori, tamar, levi. כל אחד יגיב ישירות למה שנאמר לפי העמדה שלו: maya חיובית, ori מתנגד, tamar אופטימית, levi פסימי. הם צריכים להוסיף ערך חדש, שאלה או הצעה מעשית.`
+      const transcript = [...activeDiscussion.replies, humanReply].map((reply) => `${reply.human ? (humanName || 'המנחה') : reply.agent?.name}: ${reply.text}`).join('\n')
+      const respondents = selectedAgent ? agents.filter((agent) => agent.id === selectedAgent) : agents
+      const prompt = `אנחנו בדיון חי בעברית על הנושא: ${activeDiscussion.idea.text}. הקשר מחקרי: ${research?.text ?? 'טרם בוצע מחקר'}. הנה היסטוריית השיחה:\n${transcript}\nהמנחה (${humanName}) הוסיף עכשיו תגובה. החזר JSON בלבד כמערך של ${respondents.length} אובייקטים עם השדות agent ו-text. החזר תגובה אחת רק לכל סוכן ברשימה: ${respondents.map((agent) => `${agent.id}: ${agent.name}, ${agent.voice}`).join('; ')}. הגב ישירות למה שנאמר והוסף ערך חדש, שאלה או הצעה מעשית.`
       const result = await window.localAI.generate(prompt)
       if (!result.ok) throw new Error(result.error ?? 'הדיון נכשל')
       const generated = JSON.parse((result.text ?? '[]').replace(/```json|```/g, '').trim()) as Array<{ agent: string; text: string }>
@@ -333,291 +355,91 @@ function App() {
     setIsDiscussing(false)
   }
 
+  const busy = isThinking || isDiscussing
+  const chosenAgent = agents.find((agent) => agent.id === selectedAgent)
+  const participants = [...agents, { id: 'human', name: humanName, role: 'המנחה', color: '#339c83' }]
+  const chooseParticipant = (id: string | null) => {
+    setSelectedAgent(id)
+    setTab('chat')
+  }
+
   return (
     <main className="app-shell" dir="rtl">
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">🧠⚡</span>
-          <div>
-            <strong>סיעור מוחות</strong>
-            <small>Gemini 3.8 Flash · חיבור מוצפן · שולחן עגול חכם</small>
-          </div>
-        </div>
+        <div className="brand"><div className="brand-mark"><Orbit size={27} strokeWidth={1.5} /></div><div><h1>שולחן העתיד</h1><small>סיעור מוחות</small></div></div>
+        <div className="session-mark"><span /> חדר 01 <span className="session-separator">/</span> סבב {String(round).padStart(2, '0')}</div>
         <div className="top-actions">
-          <span className="live-dot">●</span>
-          <span>חיבור מוצפן</span>
-          <button className="icon-button" onClick={() => setShowSettings(true)} aria-label="הגדרות">⚙</button>
+          <button className={`connection-button ${aiConfigured ? 'connected' : ''}`} onClick={() => setShowSettings(true)}><span />{aiConfigured === null ? 'בודק חיבור' : aiConfigured ? 'Gemini מחובר' : 'חיבור Gemini'}</button>
+          <button className="icon-button" onClick={() => setShowSettings(true)} aria-label="הגדרות" title="הגדרות"><Settings size={19} /></button>
         </div>
       </header>
 
-      <section className="hero-section">
-        <div className="eyebrow">סבב {String(round).padStart(2, '0')} · שולחן סיעור חי</div>
-        <h1 className="hero-title" onClick={() => document.getElementById('topic-input-box')?.focus()}>
-          תלחץ כאן ונתחיל ליצור
-        </h1>
-        <div className="topic-input-container">
-          <span className="topic-prompt-icon">💡</span>
-          <input
-            id="topic-input-box"
-            className="topic-input-field"
-            value={topic}
-            onChange={(event) => setTopic(event.target.value)}
-            placeholder="תלחץ כאן ונתחיל ליצור..."
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') void runRound()
-            }}
-          />
-          {topic && (
-            <button className="clear-btn" onClick={() => setTopic('')} title="נקה">✕</button>
-          )}
-        </div>
-        <div className="hero-meta">
-          <span>5 משתתפים מסביב לשולחן · חשיבה רב-ממדית · מחקר מבוסס רשת</span>
-          <span className="status-pill"><i /> {isThinking ? 'המוחות בסערת רעיונות' : 'מוכנים להזנקת הסיעור'}</span>
-        </div>
-      </section>
+      <form className="topic-bar" onSubmit={(event) => { event.preventDefault(); void runRound() }}>
+        <div className="topic-label"><Lightbulb size={18} /><label htmlFor="topic-input-box">על השולחן</label></div>
+        <input id="topic-input-box" value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="מה האתגר הבא שלנו?" disabled={busy} />
+        <button className="primary-button" type="submit" disabled={busy || aiConfigured === null}>{isThinking ? <LoaderCircle size={17} className="spin" /> : <Play size={16} fill="currentColor" />}<span>{isThinking ? 'סיעור בתהליך' : 'התחל סיעור'}</span></button>
+      </form>
 
-      <section className="table-stage">
-        <div className="table-top-perspective">
-          <div className={`realistic-round-table ${isThinking ? 'storming-table' : ''}`}>
-            <div className="table-wood-rim" />
-            <div className="table-wood-grain" />
-
-            {/* Top-down Seating Pods */}
-            <div className="seat-pod seat-ori">
-              <div className="chair-overhead" />
-              <div className="desk-placemat">
-                <div className="coffee-cup" />
-                <div className="notepad" />
-              </div>
-              <div className="seat-badge" style={{ borderColor: agents[1].color }}>
-                <div className="seat-avatar" style={{ background: agents[1].color }}>{agents[1].initials}</div>
-                <div className="seat-details">
-                  <strong>{agents[1].name}</strong>
-                  <small>{agents[1].role}</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="seat-pod seat-maya">
-              <div className="chair-overhead" />
-              <div className="desk-placemat">
-                <div className="coffee-cup" />
-                <div className="notepad" />
-              </div>
-              <div className="seat-badge" style={{ borderColor: agents[0].color }}>
-                <div className="seat-avatar" style={{ background: agents[0].color }}>{agents[0].initials}</div>
-                <div className="seat-details">
-                  <strong>{agents[0].name}</strong>
-                  <small>{agents[0].role}</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="seat-pod seat-tamar">
-              <div className="chair-overhead" />
-              <div className="desk-placemat">
-                <div className="coffee-cup" />
-                <div className="notepad" />
-              </div>
-              <div className="seat-badge" style={{ borderColor: agents[2].color }}>
-                <div className="seat-avatar" style={{ background: agents[2].color }}>{agents[2].initials}</div>
-                <div className="seat-details">
-                  <strong>{agents[2].name}</strong>
-                  <small>{agents[2].role}</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="seat-pod seat-human">
-              <div className="chair-overhead human-chair" />
-              <div className="desk-placemat">
-                <div className="laptop-overhead" />
-                <div className="coffee-cup" />
-              </div>
-              <div className="seat-badge human-badge">
-                <div className="seat-avatar human-avatar">{humanName.slice(0, 2)}</div>
-                <div className="seat-details">
-                  {isEditingName ? (
-                    <div className="name-edit-form" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        className="name-edit-input"
-                        value={tempName}
-                        onChange={(e) => setTempName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') saveHumanName()
-                          if (e.key === 'Escape') setIsEditingName(false)
-                        }}
-                        autoFocus
-                      />
-                      <button className="name-save-btn" onClick={saveHumanName} title="שמור">✓</button>
-                    </div>
-                  ) : (
-                    <div
-                      className="name-clickable-row"
-                      onClick={() => { setTempName(humanName); setIsEditingName(true) }}
-                      title="לחצו לעריכת שמכם בשולחן"
-                    >
-                      <strong>{humanName}</strong>
-                      <span className="edit-pill">✏️ עריכה</span>
-                    </div>
-                  )}
-                  <small>המנחה · קול אנושי</small>
-                </div>
-              </div>
-            </div>
-
-            <div className="seat-pod seat-levi">
-              <div className="chair-overhead" />
-              <div className="desk-placemat">
-                <div className="coffee-cup" />
-                <div className="notepad" />
-              </div>
-              <div className="seat-badge" style={{ borderColor: agents[3].color }}>
-                <div className="seat-avatar" style={{ background: agents[3].color }}>{agents[3].initials}</div>
-                <div className="seat-details">
-                  <strong>{agents[3].name}</strong>
-                  <small>{agents[3].role}</small>
-                </div>
-              </div>
-            </div>
-
-            {/* Table Center: Start Button & Brainstorming Effects */}
-            <div className="table-center-hub">
-              <div className="hub-glass-platter">
-                <button
-                  className={`table-start-action-btn ${isThinking ? 'in-storm' : ''}`}
-                  onClick={runRound}
-                  disabled={isThinking}
-                  title="לחצו להתחלת סיעור המוחות"
-                >
-                  <div className="btn-lightning-glow" />
-                  <div className="start-btn-icon-pair">
-                    <span className="brain-glyph">🧠</span>
-                    <span className="lightning-glyph">⚡</span>
-                  </div>
-                  <span className="start-btn-caption">{isThinking ? 'חושבים בסערה…' : 'התחל'}</span>
-                </button>
-
-                {isThinking && (
-                  <div className="table-storm-burst" aria-hidden="true">
-                    <span className="table-bolt bolt-top">⚡</span>
-                    <span className="table-bolt bolt-right">⚡</span>
-                    <span className="table-bolt bolt-bottom">⚡</span>
-                    <span className="table-bolt bolt-left">⚡</span>
-                    <div className="storm-ripple" />
-                  </div>
-                )}
-              </div>
-            </div>
+      <div className="room-layout">
+        <section className="room-stage" aria-label="שולחן הדיונים">
+          <div className="scene-wrap">
+            <Suspense fallback={<div className="scene-loading" role="status"><LoaderCircle className="spin" /> טוען את החדר</div>}>
+              <RoundTableScene participants={participants} selectedAgent={selectedAgent} activeAgent={discussion?.replies.at(-1)?.agent?.id ?? null} thinking={busy} onSelect={chooseParticipant} />
+            </Suspense>
+            <div className="room-hud"><div><span className="room-live"><span /> השולחן פתוח</span><span className="room-count">05 / משתתפים</span></div><span className="dimension-mark">3D <CircleDot size={14} /></span></div>
+            {busy && <div className="thinking-status" role="status"><LoaderCircle size={17} className="spin" />{isThinking ? thinkingPhase : chosenAgent ? `${chosenAgent.name} חושב/ת` : 'הצוות חושב'}</div>}
           </div>
-        </div>
-        <div className="table-caption">
-          <span>מבט־על על שולחן הדיונים</span>
-          <span className="caption-line" />
-          <span>לחצו על כפתור ״התחל״ במרכז השולחן כדי להצית את הסיעור</span>
-        </div>
-      </section>
+          <footer className="participant-bar">
+            <div className="participant-heading"><span>סביב השולחן</span><small>{chosenAgent ? `בשיחה עם ${chosenAgent.name}` : 'בשיחה עם כולם'}</small></div>
+            <div className="participant-options" role="group" aria-label="נמעני השיחה">
+              <button className={`participant-option everyone ${!selectedAgent ? 'is-selected' : ''}`} aria-label="שיחה עם כולם" aria-pressed={!selectedAgent} onClick={() => chooseParticipant(null)}><span className="avatar"><Users size={18} /></span><span><strong>כולם</strong><small>שולחן פתוח</small></span></button>
+              {agents.map((agent) => <button key={agent.id} className={`participant-option ${selectedAgent === agent.id ? 'is-selected' : ''}`} aria-label={`שיחה עם ${agent.name}`} aria-pressed={selectedAgent === agent.id} onClick={() => chooseParticipant(selectedAgent === agent.id ? null : agent.id)}><span className="avatar" style={{ background: agent.color }}>{agent.initials}</span><span><strong>{agent.name}</strong><small>{agent.role}</small></span></button>)}
+            </div>
+          </footer>
+        </section>
 
-      <section className="workspace">
-        <div className="workspace-heading">
-          <div>
-            <div className="section-kicker">רעיונות שעלו בשיחה</div>
-            <h2>מה אנחנו חושבים?</h2>
+        <aside className="conversation-dock" aria-label="שיחה ורעיונות">
+          <div className="dock-heading"><div><span className="section-kicker">מרחב משותף</span><h2>{chosenAgent ? `שיחה עם ${chosenAgent.name}` : 'השיחה שלנו'}</h2></div><MessageCircle size={23} strokeWidth={1.4} /></div>
+          <div className="dock-tabs" role="tablist" aria-label="תוכן השולחן">
+            <button id="tab-chat" role="tab" aria-selected={tab === 'chat'} aria-controls="panel-chat" onClick={() => setTab('chat')}><MessageCircle size={16} />שיחה</button>
+            <button id="tab-ideas" role="tab" aria-selected={tab === 'ideas'} aria-controls="panel-ideas" onClick={() => setTab('ideas')}><Lightbulb size={16} />רעיונות <span className="tab-count">{ideas.length}</span></button>
+            <button id="tab-research" role="tab" aria-selected={tab === 'research'} aria-controls="panel-research" onClick={() => setTab('research')}><FlaskConical size={16} />מחקר{research && <span className="research-ready" />}</button>
           </div>
-          <button className="primary-button" onClick={runRound} disabled={isThinking || aiConfigured !== true}>
-            {isThinking ? 'חוקרים וחושבים…' : aiConfigured === null ? 'בודק חיבור…' : '⚡ התחל סבב חדש'}
-          </button>
-        </div>
-        {notice && <div className="notice">{notice}</div>}
-        {research && (
-          <button className="research-toggle" onClick={() => setShowResearch(true)}>
-            <span className="research-icon">⌕</span>
-            <span>
-              <strong>המחקר מוכן</strong>
-              <small>לצפייה במקורות ובתובנות שג׳מיני סידר</small>
-            </span>
-            <b>פתיחה ↗</b>
-          </button>
-        )}
-        <div className="idea-list">
-          {ideas.map((idea) => (
-            <article className="idea-card" key={idea.id}>
-              <div className="idea-person">
-                <div className="avatar" style={{ background: idea.color }}>
-                  {idea.author.slice(0, 1)}
-                </div>
-                <div>
-                  <strong>{idea.author}</strong>
-                  <small>{idea.role}</small>
-                </div>
+          {notice && <div className="notice" role="status"><span>{notice}</span><button className="icon-button" aria-label="סגירת הודעה" title="סגירת הודעה" onClick={() => setNotice('')}><X size={14} /></button></div>}
+
+          <div className="dock-content" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0}>
+            {tab === 'chat' && <>
+              {discussion && <div className="discussion-context"><span>{discussion.idea.text}</span><button className="icon-button" title="סיום דיון" aria-label="סיום דיון" disabled={busy} onClick={() => setDiscussion(null)}><X size={15} /></button></div>}
+              {!discussion && <div className="empty-conversation"><div className="empty-symbol"><MessageCircle size={30} strokeWidth={1.3} /><span /></div><span className="section-kicker">ארבע נקודות מבט. שולחן אחד.</span><h3>{chosenAgent ? `מה דעתך, ${chosenAgent.name}?` : 'מה נרצה לשנות?'}</h3><div className="empty-roster">{agents.map((agent) => <span key={agent.id} className="avatar" style={{ background: agent.color }}>{agent.initials}</span>)}</div><p>{chosenAgent?.voice ?? 'מאיה, אורי, תמר ולוי סביב השולחן.'}</p></div>}
+              <div className="reply-list" role="log" aria-label="היסטוריית השיחה" aria-live="polite" aria-relevant="additions text">
+                {discussion?.replies.map((reply, index) => <article className={`reply ${reply.human ? 'human-reply' : ''}`} key={index}><span className="avatar" style={{ background: reply.human ? '#339c83' : reply.agent?.color }}>{reply.human ? humanName.slice(0, 1) : reply.agent?.initials}</span><div><div className="reply-byline"><strong>{reply.human ? humanName : reply.agent?.name}</strong><small>{reply.human ? 'המנחה' : reply.agent?.role}</small></div><p>{reply.text}</p></div></article>)}
               </div>
-              <p>{idea.text}</p>
-              <div className="idea-actions">
-                <button className="discussion-button" onClick={() => discussIdea(idea)}>
-                  ◌ פתח דיון סביב הרעיון
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
-        <div className="human-input">
-          <div className="input-avatar">{humanName.slice(0, 2)}</div>
-          <textarea
-            value={humanThought}
-            onChange={(event) => setHumanThought(event.target.value)}
-            placeholder={`יש לך מחשבה משלך, ${humanName}? הנח/י אותה על השולחן…`}
-          />
-          <button className="send-button" onClick={addHumanIdea} aria-label="הוספת רעיון">↑</button>
-        </div>
-      </section>
-      {isThinking && <div className="thinking-overlay" role="status"><div className="thinking-card"><div className="thinking-orbit"><span>🧠</span><i>ϟ</i><i>ϟ</i><i>ϟ</i></div><div className="section-kicker">סיעור בתנועה</div><h2>{thinkingPhase}</h2><p>ארבע נקודות מבט מתנגשות, מתחברות ומחפשות את הניצוץ הבא.</p><div className="thinking-dots"><i /><i /><i /></div></div></div>}
-      {showResearch && research && <div className="modal-backdrop research-backdrop" onClick={() => setShowResearch(false)}><section className="research-modal" onClick={(event) => event.stopPropagation()}><button className="close-button" onClick={() => setShowResearch(false)}>×</button><div className="research-heading"><span className="research-icon">⌕</span><div><div className="section-kicker">מודיעין מקדים</div><h2>מה למדנו מהרשת</h2></div></div><p className="research-copy">{research.text}</p>{research.sources.length > 0 && <div className="source-list">{research.sources.map((source) => <a href={source.uri} target="_blank" rel="noreferrer" key={source.uri}>{source.title || source.uri}</a>)}</div>}<div className="research-footnote">המחקר שימש את ארבעת הסוכנים כהקשר, לא כתשובה.</div></section></div>}
-      {discussion && <section className="discussion-panel"><div className="discussion-header"><div><div className="section-kicker">שיחה חיה סביב רעיון</div><h2>{discussion.idea.text}</h2></div><button className="close-discussion" onClick={() => setDiscussion(null)}>×</button></div><div className="reply-list">{discussion.replies.map((reply, index) => <article className={`reply-card ${reply.human ? 'human-reply' : ''}`} key={`${reply.human ? 'human' : reply.agent?.id}-${index}`}><div className="avatar" style={{ background: reply.human ? '#213b59' : reply.agent?.color }}>{reply.human ? 'את' : reply.agent?.initials}</div><div><strong>{reply.human ? 'את/ה · המנחה' : `${reply.agent?.name} · ${reply.agent?.role}`}</strong><p>{reply.text}</p></div></article>)}</div><div className="human-input discussion-input"><div className="input-avatar">את</div><textarea value={discussionThought} onChange={(event) => setDiscussionThought(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendDiscussionMessage() } }} placeholder="הגב/י לצוות והמשיכו את הדיון…" /><button className="send-button" onClick={() => void sendDiscussionMessage()} disabled={isDiscussing} aria-label="שליחת תגובה">{isDiscussing ? '…' : '↑'}</button></div></section>}
-      {showSettings && (
-        <div className="modal-backdrop" onClick={() => { if (aiConfigured) setShowSettings(false) }}>
-          <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
-            <button className="close-button" onClick={() => setShowSettings(false)}>×</button>
-            <div className="section-kicker">חיבור מודל מוצפן</div>
-            <h2>Gemini 3.8 Flash</h2>
-            <p>
-              {aiConfigured
-                ? 'החיבור פעיל ומאובטח. כל הבקשות מוצפנות בתקן TLS ומפתח ה-API נשמר מוצפן (AES-GCM / DPAPI) במכשיר שלך בלבד.'
-                : 'הדבק/י כאן מפתח Gemini API. החיבור מוצפן ב-TLS/HTTPS והמפתח נשמר מוצפן (AES-GCM 256-bit) במכשיר שלך בלבד.'}
-            </p>
-            <div className={`connection-state ${aiConfigured ? 'connected' : ''}`}>
-              <span /> {aiConfigured ? 'חיבור מוצפן ל-Gemini 3.8 Flash פעיל 🔒' : 'נדרש מפתח API תקין'}
-            </div>
-            {notice && <div className="modal-notice">{notice}</div>}
-            <input
-              className="api-key-input"
-              type="text"
-              value={apiKeyInput}
-              onChange={(event) => setApiKeyInput(event.target.value)}
-              placeholder="AIzaSy..."
-              autoFocus={!aiConfigured}
-              onKeyDown={(event) => { if (event.key === 'Enter') void saveApiKey() }}
-            />
-            <button
-              className="primary-button full-button"
-              onClick={() => void saveApiKey()}
-              disabled={!apiKeyInput.trim() || isSavingKey}
-            >
-              {isSavingKey ? 'בודק ומצפין חיבור מול Google...' : 'שמירת מפתח ואימות חיבור מוצפן'}
-            </button>
-            <div className="key-help-link">
-              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
-                אין לך מפתח? לחץ/י כאן לקבלת מפתח חינמי ב-Google AI Studio ↗
-              </a>
-            </div>
-            {aiConfigured && (
-              <button className="secondary-button full-button" onClick={() => setShowSettings(false)}>
-                סגירה
-              </button>
-            )}
+              {isDiscussing && <div className="reply-pending"><LoaderCircle size={15} className="spin" /><span>מגבשים תשובה...</span></div>}
+              <div ref={repliesEndRef} />
+            </>}
+            {tab === 'ideas' && <div className="idea-list">
+              {!ideas.length && <div className="empty-state"><Lightbulb size={30} strokeWidth={1.3} /><h3>מקום לרעיון הבא</h3><p>{isThinking ? thinkingPhase : 'עדיין אין רעיונות בסבב הזה.'}</p></div>}
+              {ideas.map((idea, index) => <article className="idea-card" key={idea.id}><div className="idea-person"><span className="avatar" style={{ background: idea.color }}>{idea.author.slice(0, 1)}</span><div><strong>{idea.author}</strong><small>{idea.role}</small></div><span className="idea-number">{String(index + 1).padStart(2, '0')}</span></div><p>{idea.text}</p><button className="discussion-button" disabled={busy} onClick={() => void discussIdea(idea)}><MessageCircle size={15} />פתח דיון</button></article>)}
+            </div>}
+            {tab === 'research' && (research ? <div className="research-content"><span className="section-kicker">תמונת מצב</span><h3>מה למדנו מהרשת</h3><p className="research-copy">{research.text}</p>{research.sources.length > 0 && <div className="source-list"><h4>מקורות</h4>{research.sources.filter((source) => /^https?:\/\//i.test(source.uri ?? '')).map((source, index) => <a href={source.uri} target="_blank" rel="noreferrer" key={index}>{source.title || source.uri}<ExternalLink size={14} /></a>)}</div>}</div> : <div className="empty-state"><FlaskConical size={30} strokeWidth={1.3} /><h3>תמונת המצב</h3><p>{isThinking ? 'המחקר בתהליך...' : 'טרם בוצע מחקר לסבב הזה.'}</p></div>)}
           </div>
-        </div>
-      )}
+
+          {tab !== 'research' && <form className="composer" onSubmit={(event) => { event.preventDefault(); if (tab === 'ideas') addHumanIdea(); else void sendDiscussionMessage() }}>
+            <div className="composer-target"><span className="participant-dot" style={{ background: chosenAgent?.color ?? '#339c83' }} />{tab === 'ideas' ? 'הרעיון שלי' : chosenAgent ? `אל ${chosenAgent.name}` : 'אל כל השולחן'}</div>
+            <div className="composer-field"><textarea aria-label={tab === 'ideas' ? 'רעיון חדש' : 'הודעה לשולחן'} value={tab === 'ideas' ? humanThought : discussionThought} onChange={(event) => tab === 'ideas' ? setHumanThought(event.target.value) : setDiscussionThought(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!busy) { if (tab === 'ideas') addHumanIdea(); else void sendDiscussionMessage() } } }} placeholder={tab === 'ideas' ? 'יש לי רעיון...' : 'מה עובר לך בראש?'} rows={2} /><button type="submit" className="send-button" disabled={busy || !(tab === 'ideas' ? humanThought : discussionThought).trim()} aria-label={tab === 'ideas' ? 'הוספת רעיון' : 'שליחת תגובה'} title={tab === 'ideas' ? 'הוספת רעיון' : 'שליחת תגובה'}>{isDiscussing ? <LoaderCircle className="spin" size={19} /> : <ArrowUp size={20} />}</button></div>
+          </form>}
+          <div className="human-identity"><span className="avatar human-avatar">{humanName.slice(0, 1)}</span>{isEditingName ? <form className="name-edit-form" onSubmit={(event) => { event.preventDefault(); saveHumanName() }}><input aria-label="השם שלי" maxLength={24} value={tempName} onChange={(event) => setTempName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setIsEditingName(false) }} autoFocus /><button className="icon-button" type="submit" title="שמירת שם" aria-label="שמירת שם"><Check size={17} /></button></form> : <><div><strong>{humanName}</strong><small>המנחה</small></div><button className="icon-button" title="עריכת השם שלי" aria-label="עריכת השם שלי" onClick={() => { setTempName(humanName); setIsEditingName(true) }}><Pencil size={15} /></button></>}<span className="human-presence" /></div>
+        </aside>
+      </div>
+
+      <dialog ref={settingsRef} className="settings-modal" aria-labelledby="settings-title" onCancel={() => setShowSettings(false)} onClose={() => setShowSettings(false)} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setShowSettings(false) } }}>
+        <button className="icon-button close-button" onClick={() => setShowSettings(false)} title="סגירת הגדרות" aria-label="סגירת הגדרות"><X size={20} /></button>
+        <span className="section-kicker">הגדרות החדר</span><h2 id="settings-title">חיבור Gemini</h2>
+        <div className={`connection-state ${aiConfigured ? 'connected' : ''}`}><span />{aiConfigured ? 'Gemini מחובר' : 'נדרש מפתח API'}</div>
+        {notice && <p className="modal-notice" role="status">{notice}</p>}
+        <form onSubmit={(event) => { event.preventDefault(); void saveApiKey() }}><label htmlFor="api-key">Gemini API key</label><input id="api-key" className="api-key-input" type="password" autoComplete="off" spellCheck={false} value={apiKeyInput} onChange={(event) => setApiKeyInput(event.target.value)} placeholder="AIzaSy..." dir="ltr" /><button className="primary-button full-button" type="submit" disabled={!apiKeyInput.trim() || isSavingKey}>{isSavingKey ? <LoaderCircle size={17} className="spin" /> : <Check size={17} />}{isSavingKey ? 'מאמת חיבור...' : 'שמירה ואימות חיבור'}</button></form>
+        <a className="key-help-link" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">קבלת מפתח ב-Google AI Studio <ExternalLink size={14} /></a>
+      </dialog>
     </main>
   )
 }

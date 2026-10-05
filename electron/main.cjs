@@ -18,10 +18,13 @@ function loadStoredKey() {
   }
 }
 
-function storeKey() {
-  if (!apiKey || !safeStorage.isEncryptionAvailable()) return
+function storeKey(value = apiKey) {
+  if (!value) return
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('Encrypted storage unavailable')
   fs.mkdirSync(path.dirname(keyFile), { recursive: true })
-  fs.writeFileSync(keyFile, safeStorage.encryptString(apiKey))
+  const temporaryFile = `${keyFile}.tmp`
+  fs.writeFileSync(temporaryFile, safeStorage.encryptString(value))
+  fs.renameSync(temporaryFile, keyFile)
 }
 
 function createWindow() {
@@ -43,30 +46,36 @@ function createWindow() {
 
 ipcMain.handle('gemini:status', () => ({ configured: Boolean(apiKey) }))
 
-ipcMain.handle('gemini:set-key', (_event, value) => {
+ipcMain.handle('gemini:set-key', async (_event, value) => {
   const nextKey = String(value || '').trim()
   if (!nextKey) return { configured: false, ok: false, error: 'מפתח Gemini ריק' }
+  const validation = await askGemini({ contents: [{ parts: [{ text: 'שלום' }] }] }, nextKey)
+  if (!validation.ok) return { ...validation, configured: Boolean(apiKey) }
+  try {
+    storeKey(nextKey)
+  } catch {
+    return { configured: Boolean(apiKey), ok: false, error: 'לא ניתן לשמור את המפתח מוצפן במחשב. המפתח הקודם לא הוחלף.' }
+  }
   apiKey = nextKey
-  storeKey()
   return { configured: true, ok: true }
 })
 
-async function callGeminiApi(model, body) {
-  return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+async function callGeminiApi(model, body, key) {
+  return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify(body),
   })
 }
 
-async function askGemini(body) {
+async function askGemini(body, key = apiKey) {
   // Test gemini-3.8-flash first, fallback to gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash
   const models = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
   let lastError = ''
 
   for (const model of models) {
     try {
-      const response = await callGeminiApi(model, body)
+      const response = await callGeminiApi(model, body, key)
       if (response.ok) {
         return { configured: true, ok: true, data: await response.json() }
       }
@@ -115,7 +124,7 @@ ipcMain.handle('gemini:generate', async (_event, { prompt }) => {
 
 app.whenReady().then(() => {
   loadStoredKey()
-  storeKey()
+  try { storeKey() } catch { console.warn('Gemini key could not be persisted to encrypted storage.') }
   createWindow()
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
