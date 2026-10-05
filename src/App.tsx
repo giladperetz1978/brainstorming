@@ -95,8 +95,7 @@ if (typeof window !== 'undefined' && !window.localAI) {
   }
 
   const tryAllModels = async (key: string, body: unknown) => {
-    // Prioritize Gemini 3.8 Flash, with fallback to 2.5, 2.0, and 1.5
-    const models = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    const models = ['gemini-3.8-flash']
     let lastErr = ''
     for (const model of models) {
       try {
